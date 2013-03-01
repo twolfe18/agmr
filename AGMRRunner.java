@@ -6,31 +6,41 @@ import java.util.*;
 import java.io.*;
 
 public class AGMRRunner implements Runnable {
+
+	public static final long minMem = 150 * 1024 * 1024;
 	
 	public static void main(String[] args) throws Exception {
-		if(args.length != 3) {
+		if(args.length < 3) {
 			usage();
 			return;
 		}
-		AGMRRunner runner = new AGMRRunner(new File(args[1]), new File(args[2]));
+		AGMRRunner runner = new AGMRRunner(new File(args[1]));
 		AGMRDocumentMapper m = (AGMRDocumentMapper) Class.forName(args[0]).newInstance();
 		runner.addMapper(m);
+		for(int i=2; i<args.length; i++)
+			runner.addAgigaFile(args[i]);
 		assert runner.enoughFreeMem();
 		runner.run();
 	}
 
 	public static void usage() {
-		System.out.println("usage: java AGMRRunner <mapper class> <agiga file> <scratch dir>");
+		System.out.println("usage: java AGMRRunner <mapper class> <scratch dir> <agiga file+>");
 	}
 
 	private File scratchDir;
-	private File agigaFile;
+	private List<File> agigaFiles;
 	private List<MapperHolder> mappers;
 
-	public AGMRRunner(File agigaFile, File scratchDir) {
-		this.agigaFile = agigaFile;
+	public AGMRRunner(File scratchDir) {
 		this.scratchDir = scratchDir;
+		this.agigaFiles = new ArrayList<File>();
 		this.mappers = new ArrayList<MapperHolder>();
+	}
+
+	public void addAgigaFile(String path) {
+		File f = new File(path);
+		assert f.exists() && f.isFile();
+		agigaFiles.add(f);
 	}
 
 	public void addMapper(AGMRDocumentMapper m) {
@@ -38,33 +48,52 @@ public class AGMRRunner implements Runnable {
 	}
 
 	public boolean enoughFreeMem() {
-		return Runtime.getRuntime().freeMemory() > 30*1024*1024;
+		return Runtime.getRuntime().freeMemory() > minMem;
 	}
 
 	public void run() {
 
 		assert scratchDir.exists() && scratchDir.isDirectory();
-		assert agigaFile.exists() && agigaFile.isFile();
-		StreamingDocumentReader reader = new StreamingDocumentReader(agigaFile.getPath(), new AgigaPrefs());
-		for(AgigaDocument doc : reader) {
+		
+		// for timing
+		int interval = 1000;
+		long start = System.currentTimeMillis();
+		long last_start = start;
+		int docs = 0;
+		long sentences = 0;
 
-			// call the mappers
-			for(MapperHolder m : mappers)
-				m.map(doc);
+		for(File agf : agigaFiles) {
+			System.out.println("reading " + agf.getPath());
+			StreamingDocumentReader reader = new StreamingDocumentReader(agf.getPath(), new AgigaPrefs());
+			for(AgigaDocument doc : reader) {
 
-			// check if we're using too much memory
-			if(!enoughFreeMem()) {
-				// find the biggest mappers, dump them
-				Collections.sort(mappers);
-				for(MapperHolder m : mappers) {
-					try {
-						m.dump(scratchDir);
-						if(enoughFreeMem()) break;
-					}
-					catch(Exception e) {
-						throw new RuntimeException(e);
+				docs++;
+				sentences += doc.getSents().size();
+				if(docs % interval == 0) {
+					long now = System.currentTimeMillis();
+					System.out.printf("read %d docs and %d sentences so far, %.1f docs/sec recently, %.1f docs/sec overall, free mem = %d MB\n",
+						docs, sentences, (1000.0*interval)/(now - last_start), (1000.0*docs)/(now - start),
+						Runtime.getRuntime().freeMemory()/1024/1024);
+					last_start = now;
+				}
+
+				// call the mappers
+				for(MapperHolder m : mappers)
+					m.map(doc);
+
+				// check if we're using too much memory
+				if(!enoughFreeMem()) {
+					// find the biggest mappers, dump them
+					Collections.sort(mappers);
+					for(MapperHolder m : mappers) {
+						try {
+							m.dump(scratchDir);
+							if(enoughFreeMem()) break;
+						}
+						catch(Exception e) { throw new RuntimeException(e); }
 					}
 				}
+
 			}
 		}
 
@@ -74,10 +103,11 @@ public class AGMRRunner implements Runnable {
 				File merged = m.merge(scratchDir);
 				System.out.printf("%s merged output into %s\n", m.description(), merged.getCanonicalPath());
 			}
-			catch(Exception e) {
-				throw new RuntimeException(e);
-			}
+			catch(Exception e) { throw new RuntimeException(e); }
 		}
+
+		System.out.printf("done, processed %d files, %d documents, and %d sentences in %.1f second\n",
+			agigaFiles.size(), docs, sentences, (System.currentTimeMillis()-start)/1000.0);
 	}
 
 
@@ -129,8 +159,10 @@ public class AGMRRunner implements Runnable {
 
 			// writeout each key-value pair
 			File f = new File(putIn, description() + ".dump");
+			System.out.print("dumping records to " + f.getPath() + "...");
 			BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(f), "UTF-8"));
 			for(int i=0; i<keys.length; i++) {
+				assert !keys[i].contains("\n");
 				bw.write(String.format("%d\t%s\n", counts.get(keys[i]), keys[i]));
 			}
 			bw.close();
@@ -138,125 +170,19 @@ public class AGMRRunner implements Runnable {
 			dumped.add(f);
 			counts = new TObjectIntHashMap<String>();
 			System.gc();
+			System.out.println("\tdone");
 		}
 
 		/**
 		 * returns the merged file
 		 */
 		public File merge(File putIn) throws IOException {
-			assert putIn.exists() && putIn.isDirectory();
-
-			int c = 0;
-			List<File> remaining = new ArrayList<File>(dumped);
-			while(remaining.size() > 1) {
-				List<File> nr = new ArrayList<File>();
-				for(int i=0; i<remaining.size(); i+=2) {
-					if(i == remaining.size()-1)
-						nr.add(remaining.get(i));
-					else {
-						File out = new File(putIn, "merge" + (c++));
-						merge(remaining.get(i), remaining.get(i+1), out);
-						nr.add(out);
-					}
-				}
-				remaining = nr;
-			}
-			return remaining.get(0);
+			File merged = MergeCount.merge(dumped, putIn, false);
+			File namedMerged = new File(putIn, mapper.name() + ".merged");
+			merged.renameTo(namedMerged);
+			return namedMerged;
 		}
 
-		/**
-		 * expects two sorted files
-		 */
-		private static void merge(File countFile1, File countFile2, File output) throws IOException {
-
-			BufferedReader r1 = new BufferedReader(new InputStreamReader(new FileInputStream(countFile1), "UTF-8"));
-			BufferedReader r2 = new BufferedReader(new InputStreamReader(new FileInputStream(countFile2), "UTF-8"));
-			BufferedWriter w = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(output), "UTF-8"));
-
-			int c1 = 0, c2 = 0;				// counts
-			String s1 = null, s2 = null;	// keys
-
-			// current state
-			int prev_c = 0;
-			String prev_s = null;
-
-			while(true) {
-
-				// read in a line if needed
-				if(s1 == null && r1.ready()) {
-					String[] ar = r1.readLine().split("\t", 2);
-					c1 = Integer.parseInt(ar[0]);
-					s1 = ar[1];	// don't trim, print doesn't have newline
-				}
-				if(s2 == null && r2.ready()) {
-					String[] ar = r2.readLine().split("\t", 2);
-					c2 = Integer.parseInt(ar[0]);
-					s2 = ar[1];	// don't trim, print doesn't have newline
-				}
-
-
-				// note that s1 = null means to read s1 on the next loop
-				if(s1 != null && s2 != null) {
-
-					// both lines are equal to the last one
-					if(s1.equals(prev_s) && s2.equals(prev_s)) {
-						prev_c += c1 + c2;
-						s1 = null;
-						s2 = null;
-					}
-
-					// one line is equal, accum and make null (for reading in next loop)
-					else if(s1.equals(prev_s)) {
-						prev_c += c1;
-						s1 = null;
-					}
-					else if(s2.equals(prev_s)) {
-						prev_c += c2;
-						s2 = null;
-					}
-
-					// neither line is equal, write out prev, store minimum
-					else {
-						w.write(String.format("%d\t%s", prev_c, prev_s));
-						if(s1.compareTo(s2) < 0) {
-							prev_c = c1;
-							prev_s = s1;
-							s1 = null;
-						}
-						else {
-							prev_c = c2;
-							prev_s = s2;
-							s2 = null;
-						}
-					}
-				}
-
-				// one file is done, just write from the non-empty one
-				else if(s1 == null) {
-					w.write(String.format("%d\t%s", prev_c, prev_s));
-					prev_c = c2;
-					prev_s = s2;
-					s2 = null;
-				}
-				else if(s2 == null) {
-					w.write(String.format("%d\t%s", prev_c, prev_s));
-					prev_c = c1;
-					prev_s = s1;
-					s1 = null;
-				}
-
-				// both streams are expended, flush and exit
-				else {
-					w.write(String.format("%d\t%s", prev_c, prev_s));
-					break;
-				}
-			}
-
-			w.close();
-			r1.close();
-			r2.close();
-
-		}
 	}
 
 }
