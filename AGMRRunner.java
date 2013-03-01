@@ -7,7 +7,7 @@ import java.io.*;
 
 public class AGMRRunner implements Runnable {
 
-	public static final long minMem = 150 * 1024 * 1024;
+	public static final long minMem = 50 * 1024 * 1024;
 	
 	public static void main(String[] args) throws Exception {
 		if(args.length < 3) {
@@ -106,7 +106,7 @@ public class AGMRRunner implements Runnable {
 			catch(Exception e) { throw new RuntimeException(e); }
 		}
 
-		System.out.printf("done, processed %d files, %d documents, and %d sentences in %.1f second\n",
+		System.out.printf("done, processed %d files, %d documents, and %d sentences in %.1f seconds\n",
 			agigaFiles.size(), docs, sentences, (System.currentTimeMillis()-start)/1000.0);
 	}
 
@@ -129,6 +129,8 @@ public class AGMRRunner implements Runnable {
 		public List<String> map(AgigaDocument doc) {
 			List<String> items = mapper.map(doc);
 			for(String s : items) {
+				if(s.contains("\n"))
+					continue;
 				if(!counts.increment(s))
 					counts.put(s, 1);
 			}
@@ -177,10 +179,13 @@ public class AGMRRunner implements Runnable {
 		 * returns the merged file
 		 */
 		public File merge(File putIn) throws IOException {
-			File merged = MergeCount.merge(dumped, putIn, false);
-			File namedMerged = new File(putIn, mapper.name() + ".merged");
-			merged.renameTo(namedMerged);
-			return namedMerged;
+			assert dumped.size() > 0;
+			File m = dumped.size() > 1
+				? MergeCount.merge(dumped, putIn, false)
+				: dumped.get(0);
+			File named = new File(putIn, mapper.name() + ".merged");
+			m.renameTo(named);
+			return named;
 		}
 
 	}
